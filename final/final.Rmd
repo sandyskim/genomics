@@ -1,0 +1,159 @@
+---
+title: "Final Project: RNA-Seq Analysis"
+output: html_notebook
+---
+**Sandy Kim (404830610)**
+
+In this final project, I aim to explore various methods of RNA-seq data analysis in order to (1) try out different methods of analysis and (2) gain familiarity with R.
+
+I will be following two different tutorials, where code is provided, but thorough analysis of resulting graphs is not: https://www.bioconductor.org/help/course-materials/2015/LearnBioconductorFeb2015/B02.1.1_RNASeqLab.html and https://bioc.ism.ac.jp/packages/3.8/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html.
+
+First, we need to load some packages. One of which include "airway", which is a dataset from an RNA-Seq experiment on four human airway smooth muscle cell lines treated with dexamethasone, a synthetic glucocorticoid steroid with anti-inflammatory effects. Glucocorticoids are used, for example, in asthma patients to prevent or reduce inflammation of the airways. In the experiment, four primary human airway smooth muscle cell lines were treated with 1 micromolar dexamethasone for 18 hours. For each of the four cell lines, we have a treated and an untreated sample. It also contains a small subset of the raw data, namely eight BAM file each with a subset of the reads. 
+
+The reference for the experiment is:
+Himes BE, Jiang X, Wagner P, Hu R, Wang Q, Klanderman B, Whitaker RM,
+  Duan Q, Lasky-Su J, Nikolos C, Jester W, Johnson M, Panettieri R Jr,
+  Tantisira KG, Weiss ST, Lu Q. 'RNA-Seq Transcriptome Profiling
+  Identifies CRISPLD2 as a Glucocorticoid Responsive Gene that Modulates
+  Cytokine Function in Airway Smooth Muscle Cells.' PLoS One. 2014 Jun
+  13;9(6):e99625. PMID: 24926665. 
+  
+```{r}
+library(htmltools)
+library("DESeq2")
+library(ggplot2)
+library("airway")
+library("gplots")
+library("RColorBrewer")
+library("genefilter")
+library("pheatmap")
+library("PoiClaClu")
+```
+
+Then we want to load in our data.
+```{r}
+data("airway")
+se <- airway
+```
+
+We need to make sure we have all the necessary information about the samples prior to performing analysis.
+```{r}
+colData(se)
+```
+
+Here, we can see that this object contains an informative colData, because, well, it was already prepared for us in the package. Information includes sample / phenotypic information for the experiment at this stage.
+
+Since we have our annotated dataset, we can move forward by constructing a DESeqDataSet object from it!
+```{r}
+dds <- DESeqDataSet(se, design = ~ cell + dex)
+```
+
+Let's take a look at the count matrices, and the reads themselves.
+```{r}
+countdata <- assay(se)
+coldata <- colData(se)
+(ddsMat <- DESeqDataSetFromMatrix(countData = countdata,
+                                 colData = coldata,
+                                 design = ~ cell + dex))
+```
+
+To survey the dataset, we will look at the standard deviation as mean increase. 
+```{r}
+lambda <- 10^seq(from = -1, to = 2, length = 1000)
+cts <- matrix(rpois(1000*100, lambda), ncol = 100)
+meanSdPlot(cts, ranks = FALSE)
+```
+From the graph above, we can see that in our RNA-seq dataset, the variance will grow with the mean.
+
+This type of data is not good to perform analysis on! For instance, if you perform PCA on the data as it is (raw or normalized), the resulting plot typically depends mostly on the genes with highest counts because they show the largest absolute differences between samples.
+
+So, we log-transform our counts.
+```{r}
+log.cts.one <- log2(cts + 1)
+meanSdPlot(log.cts.one, ranks = FALSE)
+```
+We can see from the graph above, standard deviation no longer increases with the mean! However, differences are amplified when values are close to 0. This is seen where the standard deviation grows very quickly when the mean close to zero, and overcomes a "hill" at around mean ofone. In this case, low count genes with low signal-to-noise ratio will overly contribute to PCA plots.
+
+Luckily DESeq offers the regularized-logarithm transformation or rlog (Love, Huber, and Anders 2014), which can transform our data such that the data has same range of variance at different ranges of the mean values and the variance doesn't depend on the mean. This allows for computing distances between samples, like in a PCA plot!
+
+```{r}
+rld <- rlog(dds)
+head(assay(rld))
+```
+
+For genes with high counts, the rlog transformation differs not much from an ordinary log2 transformation. For genes with lower counts, however, the values are shrunken towards the genes' averages across all samples.
+```{r}
+par( mfrow = c( 1, 2 ) )
+dds <- estimateSizeFactors(dds)
+plot( log2( 1 + counts(dds, normalized=TRUE)[ , 1:2] ),
+     col=rgb(0,0,0,.2), pch=16, cex=0.3 )
+plot( assay(rld)[ , 1:2],
+     col=rgb(0,0,0,.2), pch=16, cex=0.3 )
+```
+We can see above on the left (ordinary log scale), that genes with low read counts have a high variability. You can see on the left (rlog scale), this variance is compressed after rlog transformation as this data would not provide good information anyway.
+
+We will begin our exploratory analysis by assessing similarity between two samples. Here, we compute the Poisson distance between samples and plot it in a heatmap to visualize their overall similarity. The Poisson distance takes the original count matrix, not normalized.
+```{r}
+poisd <- PoissonDistance(t(counts(dds)))
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- paste( dds$dex, dds$cell, sep=" - " )
+colnames(samplePoisDistMatrix) <- NULL
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors)
+```
+From the heatmap above, we can see that the untreated samples are more close to one another and the same goes for the treated samples.
+
+We can also visualize distances using a principal component analysis plot.
+```{r}
+(data <- plotPCA(rld, intgroup = c( "dex", "cell"), returnData=TRUE))
+percentVar <- round(100 * attr(data, "percentVar"))
+qplot(PC1, PC2, color=dex, shape=cell, data=data) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))
+```
+From above, we can see that the untreated samples are closer to one another, and  the treated samples are closer to one another, regardless of cell type. While the distances between different cell types are considerable, differences due to the treatment are stronger. This indicates that dexamethasone has a significant effect. It is important to note that cell types also do locate similarly relative to other cell types, although it is not as of a strong separation. But it's also interesting to note that these two PCs only capture a little over 60% of the variance of the original dataset.
+
+Let's take a look at differential expression analysis to see what genes are causing these considerable distances.
+
+```{r}
+dds$dex <- relevel(dds$dex, "untrt")
+dds <- DESeq(dds)
+(res <- results(dds))
+mcols(res, use.names=TRUE)
+```
+```{r}
+topGene <- rownames(res)[which.min(res$padj)]
+data <- plotCounts(dds, gene=topGene, intgroup=c("dex","cell"), returnData=TRUE)
+ggplot(data, aes(x=dex, y=count, fill=dex)) +
+  scale_y_log10() + 
+  geom_dotplot(binaxis="y", stackdir="center")
+```
+As you can see from the graph above, the untreated samples have much lower count values than the treated samples. This suggests that genes in treated cells have significant upregulation, while those in untreated cells have significant downregulation. It's extremely important to note that these are relative to one another.
+
+We can also take a look at an MA plot, where each dot represents a gene. On the y-axis, the “M” stands for “minus” – subtraction of log values is equivalent to the log of the ratio – and on the x-axis, the “A” stands for “average”. The vertical dashed line indicates a mean or normalized counts threshold.
+```{r}
+plotMA(res, ylim=c(-5,5))
+```
+From the MA plot, we can see the blue colored genes represent genes that are significantly differentially expressed between the two samples. Here, the dots in blue represent genes that are either significantly highly or lowly expressed. Since log2 fold change is 'dex trt vs untrt', we can see that the directionality in which genes are expressed of samples treated with dex relative to those that are not treated. In a more explicit manner, log2 fold change is dex treated divided by dex untreated (see table two code blocks earlier). So compared to the untreated samples, the blue dots above the log fold change 0 are genes that are overexpressed in treated samples, and the blue dots under the log fold change 0 are genes that are underexpressed in treated samples. Also, most of these genes are objectively highly expressed as seen by their location on the M axis, seeing that they tend to take the right side of the graph.
+
+In addition, we can graph histogram of the p values, for genes with mean normalized count larger than 1.
+```{r}
+hist(res$pvalue[res$baseMean > 1], breaks = 0:20/20,
+     col = "grey50", border = "white")
+```
+As you can see from the histogram above, there are quite a number of genes that fall in p <= 0.05.
+
+We can also cluster genes. It's of great interest to only cluster genes that are highly variable as these genes are the ones that actually carry a signal. Here we look at the top 20. Instead of looking at absolute expression strength, we look at the amount by which each gene deviates in a specific sample from the gene’s average across all samples.
+
+```{r}
+topVarGenes <- head(order(rowVars(assay(rld)), decreasing = TRUE), 20)
+mat  <- assay(rld)[ topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(rld)[, c("cell","dex")])
+pheatmap(mat, annotation_col = anno)
+```
+As seen in the heatmap above, there are bars that indicate treatment conditions and cell type conditions. It's interesting to note that the first horizontal bar, you can see that the N061011 cell type is seperated from all other cell types in the fact that gene expression is higher than average compared to the rest of the cell types. In the 8th horizontal bar onwards, gene expression is lower than average compared to the rest of the cell types. In addition, dex-untreated samples tend to have lower expression than average (blue squares), than treated samples.
+
+Cool. Well, that's all I have. Thanks Derek and Professor Lee for a great quarter! : )
